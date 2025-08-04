@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# venvs
+bin/
+llm/pyvenv.cfg
+
 # Distribution / packaging
 .Python
 build/
