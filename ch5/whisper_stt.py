@@ -8,8 +8,7 @@ import os
 
 load_dotenv()
 api_token = os.getenv('HUGGINGFACEHUB_API_TOKEN')
-
-os.environ["PATH"] += os.pathsep + r"/opt/homebrew/bin/ffmpeg/bin" # 자신이 설치한 위치로 경로 수정
+# os.environ["PATH"] += os.pathsep + r"/opt/homebrew/bin/ffmpeg/bin" # 자신이 설치한 위치로 경로 수정
 
 def whisper_stt(
     audio_file_path: str,      
@@ -67,7 +66,7 @@ def speaker_diarization(
     ):
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        use_auth_token=api_token
+        token=api_token
     )
 
     # cuda가 사용 가능한 경우 cuda를 사용하도록 설정
