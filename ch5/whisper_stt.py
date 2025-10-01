@@ -5,24 +5,30 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from pyannote.audio import Pipeline 
 from dotenv import load_dotenv
 import os
+import librosa
 
 load_dotenv()
 api_token = os.getenv('HUGGINGFACEHUB_API_TOKEN')
-# os.environ["PATH"] += os.pathsep + r"/opt/homebrew/bin/ffmpeg/bin" # 자신이 설치한 위치로 경로 수정
+# os.environ["PATH"] += os.pathsep + r"/opt/homebrew/bin/ffmpeg/bin" # conda 사용 안할 시에만 주석 해제
+
+def autio_preprocess(audio_file_path, sample_rate=16000):
+    return librosa.load(audio_file_path, sr=sample_rate)
 
 def whisper_stt(
     audio_file_path: str,      
     output_file_path: str = "./output.csv"
 ):
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    device = "cuda:0" if torch.cuda.is_available() else "mps:0" if torch.backends.mps.is_available() else "cpu"
+    torch_dtype = torch.float16 if (torch.cuda.is_available() or torch.backends.mps.is_available()) else torch.float32
     model_id = "openai/whisper-large-v3-turbo"
 
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, torch_dtype=torch_dtype, 
+        model_id, dtype=torch_dtype, 
         low_cpu_mem_usage=True, 
         use_safetensors=True
     )
+
+    print(f"device : {device}, dtype : {torch_dtype}")
     model.to(device)
 
     processor = AutoProcessor.from_pretrained(model_id)
@@ -39,9 +45,10 @@ def whisper_stt(
         stride_length_s=2,  # 2초씩 겹치도록 청크 나누기
     )
 
-    result = pipe(audio_file_path)
+    waveform, sample_rate = autio_preprocess(audio_file_path)
+    result = pipe({"raw": waveform, "sampling_rate": sample_rate})
     df = whisper_to_dataframe(result, output_file_path)
-
+ 
     return result, df
 
 
@@ -64,42 +71,41 @@ def speaker_diarization(
         output_rttm_file_path: str,
         output_csv_file_path: str
     ):
+
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
         token=api_token
     )
 
-    # cuda가 사용 가능한 경우 cuda를 사용하도록 설정
-    if torch.cuda.is_available():
-        pipeline.to(torch.device("cuda"))
-        print('cuda is available')
-    else:
-        print('cuda is not available')
-    diarization_pipeline = pipeline(audio_file_path)
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    pipeline.to(device)
 
-    # dump the diarization output to disk using RTTM format
+    waveform, sample_rate = autio_preprocess(audio_file_path)
+    diarization_pipeline = pipeline({"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": sample_rate})
+
+    diarization_data = []
+
+    for segment, speaker_id in diarization_pipeline.speaker_diarization :
+        diarization_data.append({
+            'start': segment.start,
+            'duration': segment.duration,
+            'speaker_id': speaker_id
+        })
+
+    # dump the diarization output to file using RTTM format
     with open(output_rttm_file_path, "w", encoding='utf-8') as rttm:
-        diarization_pipeline.write_rttm(rttm)
+       rttm.write(str(diarization_pipeline))
 
     # pandas dataframe으로 변환
-    df_rttm = pd.read_csv(
-        output_rttm_file_path,      # rttm 파일 경로
-        sep=' ',        # 구분자는 띄어쓰기
-        header=None,    # 헤더는 없음
-        names=['type', 'file', 'chnl', 'start', 'duration', 'C1', 'C2', 'speaker_id', 'C3', 'C4'] 
-    )
+    df_rttm = pd.DataFrame(diarization_data)
+    # print(df_rttm.head())
     
     df_rttm["end"] = df_rttm["start"] + df_rttm["duration"]
 
     # speaker_id를 기반으로 화자별로 구간을 나누기
     df_rttm["number"] = None
     df_rttm.at[0, "number"] = 0
-
-    for i in range(1, len(df_rttm)):
-        if df_rttm.at[i, "speaker_id"] != df_rttm.at[i-1, "speaker_id"]:
-            df_rttm.at[i, "number"] = df_rttm.at[i-1, "number"] + 1
-        else:
-            df_rttm.at[i, "number"] = df_rttm.at[i-1, "number"]
+    df_rttm["number"] = (df_rttm["speaker_id"] != df_rttm["speaker_id"].shift()).cumsum() - 1
 
     df_rttm_grouped = df_rttm.groupby("number").agg(
         start=pd.NamedAgg(column='start', aggfunc='min'),
@@ -128,26 +134,28 @@ def stt_to_rttm(
     result, df_stt = whisper_stt(
         audio_file_path, 
         stt_output_file_path
-    ) # ①
+    )
 
     df_rttm = speaker_diarization(
         audio_file_path,
         rttm_file_path,
         rttm_csv_file_path
-    ) # ①
+    )
 
-    df_rttm["text"] = "" #  ②
+    # rttm 결과에 stt 결과를 매칭
+    df_rttm["text"] = ""
 
-    for i_stt, row_stt in df_stt.iterrows(): #  ②
+    # 각 stt 구간이 어느 rttm 구간에 속하는지 확인
+    for i_stt, row_stt in df_stt.iterrows():
         overlap_dict = {}
-        for i_rttm, row_rttm in df_rttm.iterrows(): # ③
+        for i_rttm, row_rttm in df_rttm.iterrows():
             overlap = max(0, min(row_stt["end"], row_rttm["end"]) - max(row_stt["start"], row_rttm["start"]))
             overlap_dict[i_rttm] = overlap
         
         max_overlap = max(overlap_dict.values())
         max_overlap_idx = max(overlap_dict, key=overlap_dict.get)
 
-        if max_overlap > 0: # ③
+        if max_overlap > 0:
             df_rttm.at[max_overlap_idx, "text"] += row_stt["text"] + "\n"
 
     df_rttm.to_csv(
@@ -160,25 +168,11 @@ def stt_to_rttm(
 
 
 if __name__ == "__main__":
-    audio_file_path = "/Users/euni/SrcRepo/hsmu/llm-programming/ch5/audio/싼기타_비싼기타.mp3"       # 원본 오디오 파일
-    stt_output_file_path = "./싼기타_비싼기타.csv"	# STT 결과 파일
-    rttm_file_path = "./싼기타_비싼기타.rttm"		# 화자 분리 원본 파일
-    rttm_csv_file_path = "./싼기타_비싼기타_rttm.csv"	# 화자 분리 CSV 파일
-    final_csv_file_path = "./싼기타_비싼기타_final.csv" # 최종 결과 파일
-
-    # result, df = whisper_stt(
-    #     audio_file_path, 
-    #     stt_output_file_path
-    # )
-    # print(df)
-
-    # df_rttm = speaker_diarization(
-    #     audio_file_path,
-    #     rttm_file_path,
-    #     rttm_csv_file_path
-    # )
-
-    # print(df_rttm)
+    audio_file_path = "/Users/euni/SrcRepo/hsmu/llm-programming/ch5/audio/guitar.mp3"       # 원본 오디오 파일
+    stt_output_file_path = "./guitar.csv"	# STT 결과 파일
+    rttm_file_path = "./guitar.rttm"		# 화자 분리 원본 파일
+    rttm_csv_file_path = "./guitar_rttm.csv"	# 화자 분리 CSV 파일
+    final_csv_file_path = "./guitar_final.csv" # 최종 결과 파일
 
     df_rttm = stt_to_rttm(
         audio_file_path,
@@ -187,6 +181,3 @@ if __name__ == "__main__":
         rttm_csv_file_path,
         final_csv_file_path
     )
-
-    print(df_rttm)
-
