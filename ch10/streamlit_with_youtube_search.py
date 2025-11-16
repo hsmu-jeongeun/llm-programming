@@ -13,6 +13,10 @@ from youtube_search import YoutubeSearch
 from langchain_community.document_loaders import YoutubeLoader
 from typing import List
 
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
 
 # 모델 초기화
 llm = ChatOpenAI(model="gpt-4o-mini")
@@ -31,8 +35,8 @@ def get_current_time(timezone: str, location: str) -> str:
         return f"알 수 없는 타임존: {timezone}"
     
 @tool
-def get_web_search(query: str, search_period: str) -> str:	#①
-	#③
+def get_web_search(query: str, search_period: str) -> str:
+
     """
     웹 검색을 수행하는 함수.
 
@@ -75,7 +79,7 @@ def get_youtube_search(query: str) -> List:
 
     videos = YoutubeSearch(query, max_results=5).to_dict()
 
-    # ③# 1시간 이상의 영상은 스킵 (59:59가 최대 길이)
+    # 1시간 이상의 영상은 스킵 (59:59가 최대 길이)
     videos = [video for video in videos if len(video['duration']) <= 5]
 
     for video in videos:
@@ -105,13 +109,13 @@ llm_with_tools = llm.bind_tools(tools)
 
 # 사용자의 메시지 처리하기 위한 함수
 def get_ai_response(messages):
-    response = llm_with_tools.stream(messages) # ① llm.stream()을 llm_with_tools.stream()로 변경
+    response = llm_with_tools.stream(messages) # llm.stream()을 llm_with_tools.stream()로 변경
     
-    gathered = None # ②
+    gathered = None
     for chunk in response:
         yield chunk
         
-        if gathered is None: #  ③
+        if gathered is None:
             gathered = chunk
         else:
             gathered += chunk
@@ -160,4 +164,4 @@ if prompt := st.chat_input():
     response = get_ai_response(st.session_state["messages"])
     
     result = st.chat_message("assistant").write_stream(response) # AI 메시지 출력
-    st.session_state["messages"].append(AIMessage(result)) # AI 메시지 저장    
+    st.session_state["messages"].append(AIMessage(result)) # AI 메시지 저장
