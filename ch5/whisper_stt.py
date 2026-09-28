@@ -168,7 +168,7 @@ def stt_to_rttm(
 
 
 if __name__ == "__main__":
-    audio_file_path = "/Users/euni/SrcRepo/hsmu/llm-programming/ch5/audio/guitar.mp3"       # 원본 오디오 파일
+    audio_file_path = "ch5/audio/guitar.mp3"       # 원본 오디오 파일
     stt_output_file_path = "./guitar.csv"	# STT 결과 파일
     rttm_file_path = "./guitar.rttm"		# 화자 분리 원본 파일
     rttm_csv_file_path = "./guitar_rttm.csv"	# 화자 분리 CSV 파일
